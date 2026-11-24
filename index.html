@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<title>Tướng Lĩnh 3D - Trung Ý vs Trung Thành</title>
+<style>
+  body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; user-select: none; }
+  canvas#view { display: block; width: 100vw; height: 100vh; cursor: crosshair; }
+  #hud { position: fixed; top: 15px; left: 15px; color: #fff; background: rgba(15,23,42,0.85); padding: 12px 16px; border-radius: 10px; font-size: 14px; line-height: 1.7; pointer-events: none; border: 1px solid rgba(255,255,255,0.2); z-index: 10; }
+  #crosshair { position: fixed; top: 50%; left: 50%; width: 16px; height: 16px; transform: translate(-50%,-50%); pointer-events: none; z-index: 10; }
+  #crosshair::before, #crosshair::after { content: ''; position: absolute; background: #ffcc00; }
+  #crosshair::before { top: 7px; left: 0; width: 16px; height: 2px; }
+  #crosshair::after { left: 7px; top: 0; width: 2px; height: 16px; }
+  #minimap { position: fixed; bottom: 15px; right: 15px; border: 2px solid #fff; border-radius: 8px; background: rgba(0,0,0,0.8); z-index: 10; }
+  #winScreen { position: fixed; inset: 0; background: rgba(0,0,0,0.9); display: none; justify-content: center; align-items: center; flex-direction: column; color: #fff; z-index: 50; }
+  #winScreen button { margin-top: 15px; padding: 12px 30px; font-size: 16px; background: #ffcc00; border: none; border-radius: 25px; cursor: pointer; font-weight: bold; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <div style="color:#ffcc00;font-weight:bold;font-size:16px">⚔️ TƯỚNG LĨNH TRUNG Ý (3D FPS)</div>
+  <div>Máu Tướng: <span id="pHp" style="color:#69f0ae;font-weight:bold">300</span> | Tướng Địch: <span id="eGenHp" style="color:#448aff;font-weight:bold">300</span></div>
+  <div>Nhà chính Đỏ: <span id="bRed" style="color:#ff5252;font-weight:bold">100%</span> | Xanh: <span id="bBlue" style="color:#448aff;font-weight:bold">100%</span></div>
+  <div style="font-size:12px;color:#cbd5e1">WASD: Đi | Chuột / ◄►: Xoay | Click trái / Space: Chém | E: Gọi lính</div>
+</div>
+<div id="crosshair"></div>
+<canvas id="minimap" width="160" height="120"></canvas>
+<div id="winScreen"><h1 id="winText"></h1><button onclick="location.reload()">CHƠI LẠI</button></div>
+<canvas id="view"></canvas>
+<script>
+const cvs = document.getElementById('view'), ctx = cvs.getContext('2d');
+const mCtx = document.getElementById('minimap').getContext('2d');
+function resize() { cvs.width = window.innerWidth; cvs.height = window.innerHeight; }
+window.addEventListener('resize', resize); resize();
+
+const RAW_MAP = [
+  "1111111111111111",
+  "1000000110000001",
+  "1020000000000301",
+  "1000000110000001",
+  "1000110110110001",
+  "1000000000000001",
+  "1000000000000001",
+  "1000110110110001",
+  "1000000110000001",
+  "1000000000000001",
+  "1000000110000001",
+  "1111111111111111"
+];
+const MAP = RAW_MAP.map(row => row.split('').map(Number));
+const MW = 16, MH = 12;
+const player = { x: 3.5, y: 2.5, dir: 0, hp: 300, maxHp: 300, swing: 0, cd: 0 };
+const bases = { red: { x: 2.5, y: 2.5, hp: 1000 }, blue: { x: 13.5, y: 2.5, hp: 1000 } };
+const entities = []; // Chứa cả Tướng địch và Lính 2 phe
+
+// Tạo Tướng địch (Xanh)
+entities.push({ type: 'general', team: 'blue', x: 12.5, y: 2.5, hp: 300, maxHp: 300, cd: 0, radius: 0.45 });
+
+function spawnSoldier(team) {
+  if (entities.filter(e => e.team === team && e.type === 'soldier').length >= 15) return;
+  const bx = team === 'red' ? 3.5 : 12.5;
+  const by = 2.5 + (Math.random() - 0.5) * 2;
+  entities.push({ type: 'soldier', team, x: bx, y: by, hp: 60, maxHp: 60, cd: 0, radius: 0.3, follow: false });
+}
+for (let i = 0; i < 6; i++) { spawnSoldier('red'); spawnSoldier('blue'); }
+
+const keys = {};
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Space') attack();
+  if (e.code === 'KeyE') entities.forEach(e => { if (e.team === 'red') e.follow = !e.follow; });
+});
+window.addEventListener('keyup', e => keys[e.code] = false);
+
+cvs.addEventListener('click', () => {
+  if (document.pointerLockElement !== cvs) cvs.requestPointerLock();
+  attack();
+});
+window.addEventListener('mousemove', e => {
+  if (document.pointerLockElement === cvs) player.dir += e.movementX * 0.003;
+});
+
+function attack() {
+  if (player.cd > 0 || over) return;
+  player.swing = 1.0; player.cd = 0.4;
+  // Chém lính & tướng địch trong tầm 2.2 ô phía trước mặt
+  entities.forEach(e => {
+    if (e.team === 'blue') {
+      const dx = e.x - player.x, dy = e.y - player.y, d = Math.hypot(dx, dy);
+      const ang = Math.atan2(dy, dx) - player.dir;
+      const diff = Math.atan2(Math.sin(ang), Math.cos(ang));
+      if (d < 2.3 && Math.abs(diff) < 0.7) e.hp -= 45;
+    }
+  });
+  // Chém nhà chính địch
+  if (Math.hypot(bases.blue.x - player.x, bases.blue.y - player.y) < 2.6) {
+    bases.blue.hp = Math.max(0, bases.blue.hp - 60);
+  }
+}
+
+function canMove(nx, ny) {
+  const gx = Math.floor(nx), gy = Math.floor(ny);
+  if (gy < 0 || gy >= MH || gx < 0 || gx >= MW) return false;
+  return MAP[gy][gx] === 0;
+}
+let spawnTimer = 0, over = false, last = performance.now();
+
+function loop(now) {
+  const dt = Math.min((now - last) / 1000, 0.1); last = now;
+  const W = cvs.width, H = cvs.height;
+
+  if (!over) {
+    // Xoay & Di chuyển Tướng của bạn
+    if (keys['ArrowLeft']) player.dir -= 2.2 * dt;
+    if (keys['ArrowRight']) player.dir += 2.2 * dt;
+    let mx = 0, my = 0, spd = 4.2 * dt;
+    if (keys['KeyW']) { mx += Math.cos(player.dir) * spd; my += Math.sin(player.dir) * spd; }
+    if (keys['KeyS']) { mx -= Math.cos(player.dir) * spd; my -= Math.sin(player.dir) * spd; }
+    if (keys['KeyA']) { mx += Math.sin(player.dir) * spd; my -= Math.cos(player.dir) * spd; }
+    if (keys['KeyD']) { mx -= Math.sin(player.dir) * spd; my += Math.cos(player.dir) * spd; }
+    if (canMove(player.x + mx, player.y)) player.x += mx;
+    if (canMove(player.x, player.y + my)) player.y += my;
+
+    player.cd = Math.max(0, player.cd - dt);
+    player.swing = Math.max(0, player.swing - dt * 4);
+
+    spawnTimer += dt;
+    if (spawnTimer >= 4.0) { spawnTimer = 0; spawnSoldier('red'); spawnSoldier('blue'); }
+
+    // AI Tướng địch & Lính 2 bên
+    entities.forEach(e => {
+      e.cd = Math.max(0, e.cd - dt);
+      let tx = e.team === 'red' ? bases.blue.x : bases.red.x;
+      let ty = e.team === 'red' ? bases.blue.y : bases.red.y;
+      if (e.team === 'red' && e.follow) { tx = player.x; ty = player.y; }
+
+      let target = null, minD = Infinity;
+      entities.forEach(o => {
+        if (o.team !== e.team) {
+          const d = Math.hypot(o.x - e.x, o.y - e.y);
+          if (d < minD) { minD = d; target = o; }
+        }
+      });
+      if (e.team === 'blue') {
+        const dp = Math.hypot(player.x - e.x, player.y - e.y);
+        if (dp < minD) { minD = dp; target = player; }
+      }
+
+      if (target && minD < 1.3) {
+        if (e.cd <= 0) { e.cd = 1.0; target.hp -= (e.type === 'general' ? 25 : 10); }
+      } else if (Math.hypot(tx - e.x, ty - e.y) < 1.8 && !e.follow) {
+        if (e.cd <= 0) {
+          e.cd = 1.0;
+          if (e.team === 'red') bases.blue.hp = Math.max(0, bases.blue.hp - 15);
+          else bases.red.hp = Math.max(0, bases.red.hp - 15);
+        }
+      } else {
+        const gx = (target && minD < 5) ? target.x : tx;
+        const gy = (target && minD < 5) ? target.y : ty;
+        const ang = Math.atan2(gy - e.y, gx - e.x);
+        const vx = Math.cos(ang) * 2.3 * dt, vy = Math.sin(ang) * 2.3 * dt;
+        if (canMove(e.x + vx, e.y)) e.x += vx;
+        if (canMove(e.x, e.y + vy)) e.y += vy;
+      }
+    });
+
+    for (let i = entities.length - 1; i >= 0; i--) if (entities[i].hp <= 0) entities.splice(i, 1);
+    const eGen = entities.find(e => e.type === 'general');
+    document.getElementById('pHp').textContent = Math.max(0, Math.ceil(player.hp));
+    document.getElementById('eGenHp').textContent = eGen ? Math.ceil(eGen.hp) : 'Tử trận';
+    document.getElementById('bRed').textContent = Math.ceil((bases.red.hp / 1000) * 100) + '%';
+    document.getElementById('bBlue').textContent = Math.ceil((bases.blue.hp / 1000) * 100) + '%';
+
+    if (player.hp <= 0 || bases.red.hp <= 0 || bases.blue.hp <= 0) {
+      over = true; document.getElementById('winScreen').style.display = 'flex';
+      document.getElementById('winText').textContent = bases.blue.hp <= 0 ? '🏆 TRUNG Ý ĐẠI THẮNG!' : '💀 BẠN ĐÃ THẤT BẠI!';
+    }
+  }
+
+  // Vẽ Bầu trời & Mặt đất 3D
+  ctx.fillStyle = '#60a5fa'; ctx.fillRect(0, 0, W, H / 2);
+  ctx.fillStyle = '#365314'; ctx.fillRect(0, H / 2, W, H / 2);
+
+  // Raycasting dựng tường 3D & Nhà chính
+  const FOV = Math.PI / 3, zBuf = new Float32Array(W);
+  for (let x = 0; x < W; x += 2) {
+    const rayAng = (player.dir - FOV / 2) + (x / W) * FOV;
+    const rx = Math.cos(rayAng), ry = Math.sin(rayAng);
+    let dist = 0, hit = 0;
+    while (hit === 0 && dist < 20) {
+      dist += 0.05;
+      const tx = Math.floor(player.x + rx * dist), ty = Math.floor(player.y + ry * dist);
+      if (ty < 0 || ty >= MH || tx < 0 || tx >= MW) hit = 1;
+      else if (MAP[ty][tx] > 0) hit = MAP[ty][tx];
+    }
+    const perp = dist * Math.cos(rayAng - player.dir);
+    zBuf[x] = zBuf[x + 1] = perp;
+    const wallH = Math.min(H, H / perp);
+    const shade = Math.max(0.25, 1 - perp / 18);
+    ctx.fillStyle = hit === 2 ? `rgb(${220*shade},40,40)` : hit === 3 ? `rgb(40,100,${230*shade})` : `rgb(${100*shade},${110*shade},${95*shade})`;
+    ctx.fillRect(x, (H - wallH) / 2, 2, wallH);
+  }
+
+  // Vẽ Tướng địch & Lính 3D theo chiều sâu
+  const sprites = entities.map(e => {
+    const dx = e.x - player.x, dy = e.y - player.y;
+    return { ...e, dist: Math.hypot(dx, dy), ang: Math.atan2(dy, dx) - player.dir };
+  }).sort((a, b) => b.dist - a.dist);
+
+  sprites.forEach(s => {
+    const diff = Math.atan2(Math.sin(s.ang), Math.cos(s.ang));
+    if (Math.abs(diff) < FOV * 0.7 && s.dist > 0.4) {
+      const sx = (0.5 + diff / FOV) * W;
+      const h = (H / s.dist) * (s.type === 'general' ? 0.95 : 0.65);
+      const w = h * 0.55;
+      const ix = Math.floor(sx);
+      if (ix >= 0 && ix < W && s.dist < zBuf[ix]) {
+        ctx.fillStyle = s.team === 'red' ? '#ef4444' : '#3b82f6';
+        ctx.fillRect(sx - w / 2, H / 2 - h * 0.2, w, h * 0.7);
+        ctx.fillStyle = s.type === 'general' ? '#facc15' : '#fde047';
+        ctx.beginPath(); ctx.arc(sx, H / 2 - h * 0.35, w * 0.38, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#000'; ctx.fillRect(sx - w / 2, H / 2 - h * 0.65, w, 5);
+        ctx.fillStyle = '#4ade80'; ctx.fillRect(sx - w / 2, H / 2 - h * 0.65, w * (s.hp / s.maxHp), 5);
+      }
+    }
+  });
+
+  // Vẽ Thanh kiếm góc nhìn thứ nhất trên tay Tướng
+  ctx.save();
+  ctx.translate(W * 0.72, H * 0.85);
+  ctx.rotate(-0.4 - player.swing * 1.1);
+  ctx.fillStyle = '#e2e8f0'; ctx.fillRect(-10, -240, 20, 220);
+  ctx.fillStyle = '#f59e0b'; ctx.fillRect(-35, -30, 70, 14);
+  ctx.fillStyle = '#78350f'; ctx.fillRect(-10, -16, 20, 60);
+  ctx.restore();
+
+  // Minimap góc phải
+  mCtx.clearRect(0, 0, 160, 160);
+  for (let y = 0; y < MH; y++) for (let x = 0; x < MW; x++) {
+    mCtx.fillStyle = MAP[y][x] === 2 ? '#ef4444' : MAP[y][x] === 3 ? '#3b82f6' : MAP[y][x] === 1 ? '#64748b' : '#1e293b';
+    mCtx.fillRect(x * 10, y * 13, 10, 13);
+  }
+  entities.forEach(e => {
+    mCtx.fillStyle = e.type === 'general' ? '#facc15' : e.team === 'red' ? '#f87171' : '#60a5fa';
+    mCtx.beginPath(); mCtx.arc(e.x * 10, e.y * 13, e.type === 'general' ? 4 : 2.5, 0, Math.PI * 2); mCtx.fill();
+  });
+  mCtx.fillStyle = '#4ade80'; mCtx.beginPath(); mCtx.arc(player.x * 10, player.y * 13, 4, 0, Math.PI * 2); mCtx.fill();
+
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
